@@ -1,0 +1,27 @@
+{
+  "name": "ui-automation",
+  "version": "1.0.0",
+  "description": "Playwright UI automation tests",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "test:ui": "playwright test --ui",
+    "test:dev": "cross-env ENV=dev playwright test",
+    "test:staging": "cross-env ENV=staging playwright test",
+    "test:prod": "cross-env ENV=production playwright test",
+    "report": "playwright show-report"
+  },
+  "keywords": [
+    "playwright",
+    "automation",
+    "testing"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "@types/node": "^20.10.0",
+    "cross-env": "^7.0.3"
+  }
+}

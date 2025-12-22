@@ -1,0 +1,81 @@
+{
+  "searchTerms": {
+    "docName": "your-document-name"
+  },
+  "testContent": {
+    "simpleText": "QA Testing going on",
+    "markdownTable": "# Extreme AI Expert Icons\n\n|Icon|Beschreibung|\n|----|-----------|\n|![](https://dev-translation-input.s3.amazonaws.com/image-files/Extreme_Platform_ONE_Networking_v25_4_0_User_Guide/EP1_Extreme_AI_Expert.png) Extreme AI Expert|Bietet kontextbewusste Antworten über eine konversationelle Schnittstelle.| \n|![](https://dev-translation-input.s3.amazonaws.com/image-files/Extreme_Platform_ONE_Networking_v25_4_0_User_Guide/Dock_icon_25_2_0.jpg) Dock|Dockt das Extreme AI Expert-Panel an das Extreme AI Expert-Icon an. Dies ist die Standardeinstellung.|\n|![](https://dev-translation-input.s3.amazonaws.com/image-files/Extreme_Platform_ONE_Networking_v25_4_0_User_Guide/Overlay_icon_25_2_0.jpg) Overlay|Trennt das Extreme AI Expert-Panel vom Extreme AI Expert-Icon.|\n|![](https://dev-translation-input.s3.amazonaws.com/image-files/Extreme_Platform_ONE_Networking_v25_4_0_User_Guide/New_Chat_25_2_0.jpg) Neuer Chat|Initiert einen neuen Chat.|\n|![](https://dev-translation-input.s3.amazonaws.com/image-files/Extreme_Platform_ONE_Networking_v25_4_0_User_Guide/conversations_icon_25_2_0.jpg) Gespräche|Bietet Zugriff auf frühere Gespräche mit dem Extreme AI Expert.|\n|![](https://dev-translation-input.s3.amazonaws.com/image-files/Extreme_Platform_ONE_Networking_v25_4_0_User_Guide/Canvases_icon_25_2_0.jpg) Leinwände|Zeigt das ausgewählte Netzwerk-Dashboard an und bietet die folgenden Optionen:<br>-   Aktualisieren Sie das vorhandene Dashboard mit der Option **Widget ersetzen**. <br>-   Fügen Sie ein neues Widget zur Leinwand hinzu mit der Option **Zur Leinwand hinzufügen**.|\n\n**Übergeordnetes Thema:**[Extreme AI Expert](../../../Extreme_Platform_ONE/EP1_User_Guide/Topics/use_ai_expert_to_get_answers.md)"
+  },
+  "scores": {
+    "initial": 4.0,
+    "fluencyUpdated": 2.0,
+    "adequacyUpdated": 3.0,
+    "zeroToThreeLowerBoundary": 0.0,
+    "zeroToThreeUpperBoundary": 2.99,
+    "threeToThreePointFourUpperBoundary": 3.49,
+    "threePointFiveToThreePointNineLowerBoundary": 3.5,
+    "threePointFiveToThreePointNineUpperBoundary": 3.99
+  },
+  "waitTimes": {
+    "short": 500,
+    "medium": 1000,
+    "long": 1500,
+    "veryLong": 2000,
+    "extraLong": 2500,
+    "navigation": 3000,
+    "textareaFill": 800
+  },
+  "metricsScoresCheckboxValues": {
+    "fourPointZero": "4.0",
+    "zeroToTwoPointNine": "0.0-2.99",
+    "threeToThreePointFour": "3.0-3.49",
+    "threePointFiveToThreePointNine": "3.5-3.99"
+  },
+
+  "metricsScoresFilterTileTexts": {
+    "fourPointZero": "4.0",
+    "zeroToTwoPointNine": "0.0 - 2.9",
+    "threeToThreePointFour": "3.0 - 3.4",
+    "threePointFiveToThreePointNine": "3.5 - 3.9"
+  },
+    "languageCheckboxValues": {
+    "English": "en",
+    "Spanish": "es",
+    "German": "de",
+    "Japanese": "jp",
+    "Korean": "ko"
+  },
+  "languageFilterTileTexts": {
+    "English": "English",
+    "Spanish": "Spanish",
+    "German": "German",
+    "Japanese": "Japenese",
+    "Korean": "Korean"
+  },
+
+  "buttonText":{
+    "applyButtonText": "Apply",
+  "clearAllFiltersButtonText": "Clear all filters",
+  "clearAllButtonText": "Clear All"  
+  },
+  "languageFilterSuffix": {
+    "English": "_en",
+    "Spanish": "_es",
+    "German": "_de",
+    "Japanese": "_jp",
+    "Korean": "_ko"
+  },
+
+  "stausCheckboxValues": {
+    "New": "is_new",
+    "awaitingReview": "AWAITING_REVIEW",
+    "awaitingPublication": "AWAITING_PUBLICATION",
+    "published": "PUBLISHED"
+  },
+  "statusFilterTileTexts": {
+    "New": "New",
+    "awaitingReview": "Awaiting Review",
+    "awaitingPublication": "Awaiting Publication",
+    "published": "Published"
+  }
+}
