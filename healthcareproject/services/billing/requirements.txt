@@ -1,0 +1,6 @@
+# Stub service for Week 1 — health check only. Real billing logic is a later phase.
+fastapi
+uvicorn[standard]
+-e ../../libs/logging_shared
+-e ../../libs/tracing_shared
+-e ../../libs/metrics_shared

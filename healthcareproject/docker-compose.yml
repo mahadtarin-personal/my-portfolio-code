@@ -1,0 +1,316 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-smarthealth}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smarthealth}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init-multiple-dbs.sql:/docker-entrypoint-initdb.d/init.sql
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smarthealth}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  profiles:
+    build:
+      context: .
+      dockerfile: services/profiles/Dockerfile
+    env_file: jwt-keys.env  # JWT_PRIVATE_KEY + JWT_PUBLIC_KEY + SERVICE_AUTH_SECRET -- see scripts/generate_jwt_keys.py
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/profiles
+      BOOKING_BASE_URL: http://booking:8000
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports: ["8001:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  profiles-outbox-relay:
+    build:
+      context: .
+      dockerfile: services/profiles/Dockerfile
+    command: ["python", "-m", "app.outbox_relay"]
+    env_file: jwt-keys.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/profiles
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-smarthealth}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-smarthealth}
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports: ["7233:7233"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports: ["9092:9092", "29092:29092"]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    environment:
+      KAFKA_CLUSTERS_0_NAME: smarthealth
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports: ["8081:8080"]
+    depends_on:
+      - kafka
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    command: ["--kafka.server=kafka:9092"]
+    ports: ["9308:9308"]
+    depends_on:
+      - kafka
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports: ["8080:8080"]
+    depends_on:
+      - temporal
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI
+      - "4318:4318"    # OTLP/HTTP receiver — every service's tracing_shared exports here
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      # Local dev only, same posture as the shared dev-secret JWT
+      # elsewhere in this project — opening the UI just works, no login
+      # flow needed to see the provisioned dashboard.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning
+    ports: ["3001:3000"]
+    depends_on:
+      - prometheus
+
+  booking:
+    build:
+      context: .
+      dockerfile: services/booking/Dockerfile
+    env_file: jwt-public-key.env  # JWT_PUBLIC_KEY + SERVICE_AUTH_SECRET -- never the private key, see scripts/generate_jwt_keys.py
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/booking
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: booking-saga
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports: ["8002:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  booking-worker:
+    build:
+      context: .
+      dockerfile: services/booking/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    env_file: jwt-public-key.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/booking
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: booking-saga
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  booking-outbox-relay:
+    build:
+      context: .
+      dockerfile: services/booking/Dockerfile
+    command: ["python", "-m", "app.outbox_relay"]
+    env_file: jwt-public-key.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/booking
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: services/booking/Dockerfile
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info"]
+    env_file: jwt-public-key.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/booking
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: services/booking/Dockerfile
+    command: ["celery", "-A", "app.celery_app", "beat", "--loglevel=info"]
+    env_file: jwt-public-key.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/booking
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  billing:
+    build:
+      context: .
+      dockerfile: services/billing/Dockerfile
+    ports: ["8003:8000"]
+
+  analytics:
+    build:
+      context: .
+      dockerfile: services/analytics/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/analytics
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports: ["8004:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  analytics-worker:
+    build:
+      context: .
+      dockerfile: services/analytics/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/analytics
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  notification:
+    build:
+      context: .
+      dockerfile: services/notification/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/notification
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports: ["8005:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  notification-worker:
+    build:
+      context: .
+      dockerfile: services/notification/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-smarthealth}:${POSTGRES_PASSWORD:-smarthealth}@postgres:5432/notification
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  # audit and audit-worker connect as the restricted audit_writer role
+  # (deploy/postgres/audit-grants.sql), not the shared smarthealth role
+  # every other service uses — INSERT-only, enforced by Postgres itself.
+  audit:
+    build:
+      context: .
+      dockerfile: services/audit/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://audit_writer:audit-writer-dev-pass@postgres:5432/audit
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports: ["8006:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  audit-worker:
+    build:
+      context: .
+      dockerfile: services/audit/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://audit_writer:audit-writer-dev-pass@postgres:5432/audit
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+volumes:
+  pgdata:

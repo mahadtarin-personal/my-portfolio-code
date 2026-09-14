@@ -1,0 +1,23 @@
+[project]
+name = "tracing_shared"
+version = "0.1.0"
+description = "Shared OpenTelemetry tracing setup (FastAPI + httpx + SQLAlchemy auto-instrumentation, OTLP export to Jaeger) used across every service (Week 3 observability)."
+requires-python = ">=3.12"
+dependencies = [
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
+    "opentelemetry-instrumentation-fastapi",
+    "opentelemetry-instrumentation-httpx",
+    "opentelemetry-instrumentation-sqlalchemy",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

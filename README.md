@@ -1,6 +1,40 @@
-# QA Automation Framework
+# QA Automation Framework + SmartHealth Backend
 
-Comprehensive testing toolkit for document verification, API validation, UI automation, and performance testing.
+This repository now includes both the original QA automation toolkit and the SmartHealth healthcare backend project.
+
+## Included Projects
+
+- `automation/` — API, UI, and performance automation tooling
+- `file_formatting_scripts/` — document and format validation utilities
+- `performanceTesting/` — load and performance testing scripts
+- `healthcareproject/` — FastAPI-based healthcare platform with service-oriented backend architecture
+
+## SmartHealth Backend
+
+The `healthcareproject/` folder contains the healthcare operations and patient engagement platform for MediNova.
+
+### Key areas
+
+- `healthcareproject/services/` — service implementations for `profiles`, `booking`, `billing`, `analytics`, `notification`, and `audit`
+- `healthcareproject/libs/` — shared libraries including JWT auth, Kafka helpers, metrics, logging, tracing, and rate limiting
+- `healthcareproject/deploy/` — docker, Postgres, Prometheus, and Grafana setup files
+- `healthcareproject/docs/` — architecture diagrams, design docs, and project reference materials
+- `healthcareproject/postman/` — Postman collection for API exploration
+- `healthcareproject/scripts/` — utility and setup scripts
+
+### Documentation
+
+The SmartHealth project documentation lives in `healthcareproject/README.md` and includes:
+
+- architecture overview and technical flow reference
+- service responsibilities and database model notes
+- setup and local deployment instructions
+- observability and monitoring guidance
+
+See also:
+
+- `healthcareproject/docs/smarthealth_tech_flow_reference.html`
+- `healthcareproject/deploy/docker-manual-commands.md`
 
 ## 🚀 Quick Start
 
@@ -22,15 +56,29 @@ k6 run mainSuite/main.js
 ## 📁 Project Structure
 
 ```
-├── file_formatting_scripts/     # Document verification tools
-│   ├── comparison_scripts/      # Cross-format comparison (PDF ↔ Markdown)
-│   └── format_verification_scripts/ # Format validation & link extraction
+├── healthcareproject/               # SmartHealth backend platform
+│   ├── docs/                       # Architecture, diagrams, and design docs
+│   ├── deploy/                     # Deployment and observability configuration
+│   ├── libs/                       # Shared Python libraries
+│   ├── services/                   # FastAPI service modules
+│   ├── scripts/                    # JWT and setup utilities
+│   ├── postman/                    # API collection
+│   ├── README.md                   # SmartHealth project overview
+│   ├── docker-compose.yml          # Local orchestration config
+│   └── Makefile                    # Common project tasks
+├── file_formatting_scripts/         # Document verification tools
+│   ├── comparison_scripts/
+│   └── format_verification_scripts/
 ├── automation/
-│   ├── api_automation/          # REST API testing (TypeScript/Mocha)
-│   └── uiAutomation/           # Browser testing (WebdriverIO/Cucumber)
-└── performanceTesting/
-    ├── k6_productCreationScript/ # K6 load testing
-    └── chatWithDocumentScript/   # Chat API performance testing
+│   ├── api_automation/
+│   └── uiAutomation/
+├── performanceTesting/
+│   ├── k6_productCreationScript/
+│   └── chatWithDocumentScript/
+├── requirements.txt
+├── README.md
+├── LICENSE
+└── CONTRIBUTING.md
 ```
 
 ## 🛠 Technology Stack
@@ -41,93 +89,7 @@ k6 run mainSuite/main.js
 | **API Testing** | TypeScript, Mocha, Chai, Axios |
 | **UI Testing** | WebdriverIO, Cucumber, TypeScript |
 | **Performance Testing** | K6, JavaScript |
-
-## 📋 Testing Capabilities
-
-### Document Verification
-- **Image count comparison** between PDF and Markdown
-- **Content similarity analysis** across formats
-- **Hyperlink extraction** and validation
-- **Table structure verification**
-- **Code block consistency** checks
-
-### API Testing
-- **Authentication workflows** with multi-environment support
-- **CRUD operations** validation
-- **AWS S3 integration** testing
-- **Knowledge base document** management
-
-### UI Automation
-- **Machine learning model training** workflows
-- **Data pipeline configuration** testing
-- **BDD scenarios** with Cucumber
-- **Page Object Model** architecture
-
-### Performance Testing
-- **Load testing** with configurable virtual users
-- **API response time** measurement
-- **Concurrent request** handling
-- **Chat API performance** evaluation
-
-## ⚙️ Configuration
-
-All frameworks use environment variables for configuration:
-
-```bash
-# Copy example configs
-cp performanceTesting/k6_productCreationScript/.env.example .env
-
-# Update with your values
-API_BASE_URL=https://your-api.com
-TEST_USERNAME=your_username
-TEST_PASSWORD=your_password
-```
-
-## 🚀 Usage Examples
-
-### Document Verification
-```bash
-# Verify image counts between PDF and Markdown
-python file_formatting_scripts/comparison_scripts/image_verification.py
-
-# Extract and validate hyperlinks
-python file_formatting_scripts/format_verification_scripts/markdown_links_formatting.py
-```
-
-### API Testing
-```bash
-cd automation/api_automation
-npm test                    # Run all tests
-npm run test:specific      # Run specific test suite
-```
-
-### Performance Testing
-```bash
-cd performanceTesting/k6_productCreationScript
-
-# Basic load test
-k6 run mainSuite/main.js
-
-# Custom load test
-k6 run --vus 50 --duration 5m mainSuite/main.js
-```
-
-## 📊 Features
-
-✅ **Multi-format document validation**  
-✅ **Cross-browser UI testing**  
-✅ **RESTful API comprehensive testing**  
-✅ **Load and performance testing**  
-✅ **Environment-driven configuration**  
-✅ **Detailed HTML reporting**  
-✅ **CI/CD pipeline ready**
-
-## � Security
-
-- No hardcoded credentials
-- Environment variable configuration
-- Sanitized for public repositories
-- Configurable authentication methods
+| **SmartHealth Backend** | Python, FastAPI, SQLAlchemy, PostgreSQL, Kafka, Temporal, Celery, Prometheus, Grafana, Jaeger |
 
 ## 📄 License
 
@@ -135,4 +97,4 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-**Ready to use**: All scripts are sanitized and production-ready. Configure environment variables and start testing!
+The repository is now ready to contain both the automation toolkit and the SmartHealth healthcare backend project.

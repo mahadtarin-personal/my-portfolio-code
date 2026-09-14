@@ -1,0 +1,16 @@
+[project]
+name = "logging_shared"
+version = "0.1.0"
+description = "Shared structured (JSON) logging setup used across every service (Week 3 observability)."
+requires-python = ">=3.12"
+dependencies = ["opentelemetry-api>=1.20,<2.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

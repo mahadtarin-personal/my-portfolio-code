@@ -1,0 +1,1117 @@
+{
+  "info": {
+    "name": "SmartHealth API",
+    "_postman_id": "b6b6a0d0-2f0a-4a55-8f0e-smarthealth-api",
+    "description": "Covers the two real services (profiles, booking) plus health checks for the two stub services (billing, analytics).\n\nWEEK 2 UPDATE — booking is now saga-driven via Temporal, not synchronous:\n`POST /appointments` returns 202 + status 'pending' immediately and requires an `Idempotency-Key` header; a separate `booking-worker` process actually runs the reservation/billing-precheck/confirm steps and updates the appointment asynchronously. Poll 'Get Appointment Status' to watch it move pending -> reserved -> payment_pending -> confirmed (it usually resolves in under a second locally, so don't be surprised if it's already 'confirmed' by your first poll). Watch it visually at the Temporal Web UI: http://localhost:8080 (task queue `booking-saga`).\n\nSLOT GENERATION UPDATE — `POST /slots/generate` is now a real endpoint: it fetches a provider's schedule + time-off from `profiles` (a real cross-service HTTP call) and expands it into bookable Slot rows, idempotently. The same logic also runs automatically every 24h via a self-installing Temporal Schedule (`slot-generation-daily`, visible in the Temporal UI's Schedules tab) — no more manual DB scripting required for the standard flow.\n\nRESCHEDULE + WAITLIST UPDATE — `POST /appointments/{id}/reschedule` moves a confirmed appointment to a different slot via its own Temporal workflow (RescheduleAppointmentWorkflow), with compensation if the new slot turns out to be taken. `POST /waitlist` lets a patient wait for an already-taken slot; when it frees (via cancel OR reschedule-away), the oldest waiter is promoted automatically — shifted onto it via a reschedule if they already hold another confirmed appointment with that provider, otherwise booked fresh via the normal saga. Both cancel and reschedule are blocked for patients (not staff) within 30 minutes of the slot's start time.\n\nKNOWN GAPS in the current code — not Postman issues:\n1. There is no bootstrap-admin endpoint. Creating a clinic, provider, or staff user all require an existing ADMIN token, and there's no way to mint the very first one through the API. This collection works around that by minting an admin JWT locally (collection Pre-request Script) using the same shared JWT_SECRET the services use — exactly like the test suite's `auth_header()` helper does, just done in JS instead of Python. If you changed JWT_SECRET from the default `dev-secret`, update the `jwt_secret` collection variable to match.\n2. FIXED — `GET /providers/{id}/schedule` and `GET /providers/{id}/time-off` used to have no auth dependency at all. Now require self (the provider) or admin, same as their `PUT`/`POST` counterparts. Booking's own internal calls to these (during slot generation/reconciliation) now self-mint a short-lived service token to keep working.\n3. FIXED — a notification channel exists now (Week 3): booking/profiles publish events via Kafka (outbox pattern), and `notification` consumes them and records a stubbed message per event (see the new '10. Notification & Audit' folder). Still stubbed, not a real email/SMS provider — but waitlist promotion, cancellation, reschedule, etc. all now produce a visible row at `GET {{notification_base_url}}/notifications`.\n4. `GET /appointments?patient_id=` and `GET /appointments?provider_id=` are new — the only way to discover an appointment id you don't already have (e.g. after a fresh-booking waitlist promotion, which never hands the promoted patient a new id directly), or to see a provider's full schedule of who's booked in.\n\nRun order (databases are currently empty, start from the top): Setup & Health -> Profiles - Clinics -> Profiles - Providers (including 'Update Provider Schedule (self)') -> Profiles - Patients -> Profiles - Staff -> Booking - Slots ('Generate Slots for Provider' -> 'List Open Slots for Provider' -> 'Select a Slot for Booking', auto-fills slot_id) -> Booking - Appointments -> Booking - Waitlist -> Booking - Visits -> RBAC & Negative Tests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "profiles_base_url", "value": "http://localhost:8001", "type": "string" },
+    { "key": "booking_base_url", "value": "http://localhost:8002", "type": "string" },
+    { "key": "billing_base_url", "value": "http://localhost:8003", "type": "string" },
+    { "key": "analytics_base_url", "value": "http://localhost:8004", "type": "string" },
+    { "key": "notification_base_url", "value": "http://localhost:8005", "type": "string" },
+    { "key": "audit_base_url", "value": "http://localhost:8006", "type": "string" },
+    { "key": "jwt_secret", "value": "dev-secret", "type": "string" },
+    { "key": "jwt_algorithm", "value": "HS256", "type": "string" },
+    { "key": "admin_token", "value": "", "type": "string" },
+    { "key": "clinic_id", "value": "", "type": "string" },
+    { "key": "provider_id", "value": "", "type": "string" },
+    { "key": "provider_email", "value": "dr.house@example.com", "type": "string" },
+    { "key": "provider_password", "value": "diagnose-me-123", "type": "string" },
+    { "key": "provider_token", "value": "", "type": "string" },
+    { "key": "patient_id", "value": "", "type": "string" },
+    { "key": "patient_email", "value": "aisha@example.com", "type": "string" },
+    { "key": "patient_password", "value": "s3cret-pass", "type": "string" },
+    { "key": "patient_token", "value": "", "type": "string" },
+    { "key": "patient2_id", "value": "", "type": "string" },
+    { "key": "patient2_email", "value": "bilal@example.com", "type": "string" },
+    { "key": "patient2_password", "value": "another-secret", "type": "string" },
+    { "key": "patient2_token", "value": "", "type": "string" },
+    { "key": "slot_id", "value": "", "type": "string", "description": "No API creates slots yet. Insert one manually (see 'Booking - Appointments' folder description) and paste its id here." },
+    { "key": "appointment_id", "value": "", "type": "string" },
+    { "key": "front_desk_email", "value": "frontdesk@example.com", "type": "string" },
+    { "key": "front_desk_password", "value": "front-desk-pass", "type": "string" },
+    { "key": "front_desk_token", "value": "", "type": "string" },
+    { "key": "reschedule_new_slot_id", "value": "", "type": "string", "description": "Paste a different OPEN slot's id here before running 'Reschedule Appointment' — must not be the same as slot_id (the appointment's current slot)." }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Mint an admin JWT locally — this system has no bootstrap-admin endpoint,",
+          "// so the first admin token has to be issued out-of-band with the shared secret,",
+          "// the same way tests do it with jwt_shared.create_access_token(role=admin).",
+          "// Re-mints automatically if missing OR expired (not just missing) — the token",
+          "// is only valid 8h, and this collection gets reused across many days of testing.",
+          "function isExpiredOrMissing(token) {",
+          "    if (!token) return true;",
+          "    try {",
+          "        const payloadB64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');",
+          "        const padded = payloadB64 + '='.repeat((4 - payloadB64.length % 4) % 4);",
+          "        const payload = JSON.parse(atob(padded));",
+          "        return !payload.exp || (payload.exp - 30) < Math.floor(Date.now() / 1000);",
+          "    } catch (e) {",
+          "        return true;",
+          "    }",
+          "}",
+          "if (isExpiredOrMissing(pm.collectionVariables.get('admin_token'))) {",
+          "    function base64url(wordArray) {",
+          "        return CryptoJS.enc.Base64.stringify(wordArray)",
+          "            .replace(/=+$/, '')",
+          "            .replace(/\\+/g, '-')",
+          "            .replace(/\\//g, '_');",
+          "    }",
+          "    const header = { alg: 'HS256', typ: 'JWT' };",
+          "    const payload = {",
+          "        sub: 'postman-admin',",
+          "        role: 'admin',",
+          "        exp: Math.floor(Date.now() / 1000) + 8 * 60 * 60",
+          "    };",
+          "    const encodedHeader = base64url(CryptoJS.enc.Utf8.parse(JSON.stringify(header)));",
+          "    const encodedPayload = base64url(CryptoJS.enc.Utf8.parse(JSON.stringify(payload)));",
+          "    const toSign = encodedHeader + '.' + encodedPayload;",
+          "    const signature = base64url(CryptoJS.HmacSHA256(toSign, pm.collectionVariables.get('jwt_secret')));",
+          "    pm.collectionVariables.set('admin_token', toSign + '.' + signature);",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Setup & Health",
+      "item": [
+        {
+          "name": "Profiles Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{profiles_base_url}}/health"
+          }
+        },
+        {
+          "name": "Booking Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{booking_base_url}}/health"
+          }
+        },
+        {
+          "name": "Billing Health Check (stub service)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{billing_base_url}}/health"
+          }
+        },
+        {
+          "name": "Analytics Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{analytics_base_url}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Profiles - Clinics (admin)",
+      "item": [
+        {
+          "name": "Create Clinic",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "    pm.collectionVariables.set('clinic_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"MediNova Downtown Clinic\",\n  \"address\": \"221B Baker Street\",\n  \"open_time\": \"09:00:00\",\n  \"close_time\": \"17:00:00\"\n}"
+            },
+            "url": "{{profiles_base_url}}/clinics"
+          }
+        },
+        {
+          "name": "Duplicate Clinic (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 409', () => pm.response.to.have.status(409));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"MediNova Downtown Clinic\",\n  \"address\": \"221B Baker Street\",\n  \"open_time\": \"09:00:00\",\n  \"close_time\": \"17:00:00\"\n}"
+            },
+            "url": "{{profiles_base_url}}/clinics",
+            "description": "Same name+address as 'Create Clinic' — run this right after it. Unique constraint on (name, address) rejects the exact duplicate."
+          }
+        },
+        {
+          "name": "List Clinics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{profiles_base_url}}/clinics"
+          }
+        },
+        {
+          "name": "Get Clinic by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{profiles_base_url}}/clinics/{{clinic_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Profiles - Providers",
+      "item": [
+        {
+          "name": "Register Provider (admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "    pm.collectionVariables.set('provider_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"clinic_id\": \"{{clinic_id}}\",\n  \"name\": \"Dr. Gregory House\",\n  \"specialty\": \"Diagnostic Medicine\",\n  \"license_number\": \"LIC-0001\",\n  \"consultation_fee\": \"50.00\",\n  \"contact_email\": \"dr.house.contact@example.com\",\n  \"contact_phone\": \"+92-300-1111111\",\n  \"email\": \"{{provider_email}}\",\n  \"password\": \"{{provider_password}}\"\n}"
+            },
+            "url": "{{profiles_base_url}}/providers"
+          }
+        },
+        {
+          "name": "Duplicate License Number (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 409', () => pm.response.to.have.status(409));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"clinic_id\": \"{{clinic_id}}\",\n  \"name\": \"Dr. Impostor\",\n  \"specialty\": \"Diagnostic Medicine\",\n  \"license_number\": \"LIC-0001\",\n  \"consultation_fee\": \"50.00\",\n  \"contact_email\": \"impostor.contact@example.com\",\n  \"contact_phone\": \"+92-300-9999999\",\n  \"email\": \"impostor@example.com\",\n  \"password\": \"whatever-pass\"\n}"
+            },
+            "url": "{{profiles_base_url}}/providers",
+            "description": "Same license_number as 'Register Provider (admin)' (LIC-0001), different email — the license_number uniqueness check should reject this even though the email is unique."
+          }
+        },
+        {
+          "name": "Provider Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('provider_token', pm.response.json().access_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{provider_email}}\",\n  \"password\": \"{{provider_password}}\"\n}"
+            },
+            "url": "{{profiles_base_url}}/auth/login"
+          }
+        },
+        {
+          "name": "List Providers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{profiles_base_url}}/providers"
+          }
+        },
+        {
+          "name": "Get Provider by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{profiles_base_url}}/providers/{{provider_id}}"
+          }
+        },
+        {
+          "name": "Get Provider Schedule",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{provider_token}}" }],
+            "url": "{{profiles_base_url}}/providers/{{provider_id}}/schedule",
+            "description": "Now requires auth: the provider themselves (self) or an admin — matches the same ensure_self_or_roles check as PUT .../schedule. Previously had no auth dependency at all; fixed since a new backend consumer entering the trust boundary made that a real gap, not just a Docker-network-internal convenience."
+          }
+        },
+        {
+          "name": "Update Provider Schedule (self)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{provider_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"entries\": [\n    {\n      \"day_of_week\": 0,\n      \"start_time\": \"09:00:00\",\n      \"end_time\": \"17:00:00\",\n      \"slot_duration_min\": 30\n    },\n    {\n      \"day_of_week\": 1,\n      \"start_time\": \"09:00:00\",\n      \"end_time\": \"17:00:00\",\n      \"slot_duration_min\": 30\n    },\n    {\n      \"day_of_week\": 2,\n      \"start_time\": \"09:00:00\",\n      \"end_time\": \"17:00:00\",\n      \"slot_duration_min\": 30\n    },\n    {\n      \"day_of_week\": 3,\n      \"start_time\": \"09:00:00\",\n      \"end_time\": \"17:00:00\",\n      \"slot_duration_min\": 30\n    },\n    {\n      \"day_of_week\": 4,\n      \"start_time\": \"09:00:00\",\n      \"end_time\": \"17:00:00\",\n      \"slot_duration_min\": 30\n    },\n    {\n      \"day_of_week\": 5,\n      \"start_time\": \"09:00:00\",\n      \"end_time\": \"17:00:00\",\n      \"slot_duration_min\": 30\n    }\n  ]\n}"
+            },
+            "url": "{{profiles_base_url}}/providers/{{provider_id}}/schedule",
+            "description": "day_of_week is an INTEGER (0=Monday .. 6=Sunday, matching Python's date.weekday()), not a string like \"MONDAY\" — that will 422. This body sets Monday-Saturday, 9-5, 30-min slots (6 days a week; Sunday off). Run this before 'Generate Slots for Provider', which reads this schedule.\n\nOn commit, profiles fires a background (fire-and-forget, non-blocking) HTTP call to booking's POST /slots/reconcile, which starts a ReconcileProviderSlotsWorkflow for this provider — check the Temporal UI right after saving; a new workflow execution should appear within seconds, with no manual 'Generate Slots for Provider' call needed. If booking is down, this response still succeeds normally (fail-open) and the 24h scheduled job / manual generate endpoint remain as backups."
+          }
+        },
+        {
+          "name": "Add Time Off (self)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{provider_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"start_date\": \"2026-09-01\",\n  \"end_date\": \"2026-09-05\",\n  \"reason\": \"Conference\"\n}"
+            },
+            "url": "{{profiles_base_url}}/providers/{{provider_id}}/time-off",
+            "description": "Same auto-reconcile trigger as 'Update Provider Schedule (self)' fires on commit. If this provider already has open slots generated inside 2026-09-01..2026-09-05, they should flip to blocked (and vanish from 'List Open Slots for Provider') within seconds, with no manual regeneration — the actual proof that time-off now retroactively removes already-generated slots instead of only affecting future generation."
+          }
+        },
+        {
+          "name": "Duplicate Time Off (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 409', () => pm.response.to.have.status(409));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{provider_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"start_date\": \"2026-09-01\",\n  \"end_date\": \"2026-09-05\",\n  \"reason\": \"Conference\"\n}"
+            },
+            "url": "{{profiles_base_url}}/providers/{{provider_id}}/time-off",
+            "description": "Exact same date range as 'Add Time Off (self)' — run right after it. Unique constraint on (provider_id, start_date, end_date) rejects the exact-duplicate resubmission (this does NOT detect general overlapping ranges, only an identical repeat)."
+          }
+        },
+        {
+          "name": "Get Provider Time Off",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{provider_token}}" }],
+            "url": "{{profiles_base_url}}/providers/{{provider_id}}/time-off",
+            "description": "Now requires auth: the provider themselves (self) or an admin — same as Get Provider Schedule."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Profiles - Patients & Auth",
+      "item": [
+        {
+          "name": "Register Patient",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('password is never returned', () => pm.expect(pm.response.json()).to.not.have.property('password'));",
+                  "if (pm.response.code === 201) {",
+                  "    pm.collectionVariables.set('patient_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Aisha Khan\",\n  \"email\": \"{{patient_email}}\",\n  \"phone\": \"+92-300-0000000\",\n  \"password\": \"{{patient_password}}\"\n}"
+            },
+            "url": "{{profiles_base_url}}/patients"
+          }
+        },
+        {
+          "name": "Register Patient - Duplicate Email (expect 409)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Aisha Khan\",\n  \"email\": \"{{patient_email}}\",\n  \"phone\": \"+92-300-0000000\",\n  \"password\": \"{{patient_password}}\"\n}"
+            },
+            "url": "{{profiles_base_url}}/patients"
+          }
+        },
+        {
+          "name": "Patient Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('patient_token', pm.response.json().access_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{patient_email}}\",\n  \"password\": \"{{patient_password}}\"\n}"
+            },
+            "url": "{{profiles_base_url}}/auth/login"
+          }
+        },
+        {
+          "name": "Get Own Patient Profile",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient_token}}" }],
+            "url": "{{profiles_base_url}}/patients/{{patient_id}}"
+          }
+        },
+        {
+          "name": "Register Second Patient (for RBAC tests)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    pm.collectionVariables.set('patient2_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Bilal Ahmed\",\n  \"email\": \"{{patient2_email}}\",\n  \"phone\": \"+92-300-2222222\",\n  \"password\": \"{{patient2_password}}\"\n}"
+            },
+            "url": "{{profiles_base_url}}/patients"
+          }
+        },
+        {
+          "name": "Second Patient Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('patient2_token', pm.response.json().access_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{patient2_email}}\",\n  \"password\": \"{{patient2_password}}\"\n}"
+            },
+            "url": "{{profiles_base_url}}/auth/login"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Profiles - Staff (admin)",
+      "item": [
+        {
+          "name": "Create Front Desk User",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{front_desk_email}}\",\n  \"password\": \"{{front_desk_password}}\",\n  \"role\": \"front_desk\"\n}"
+            },
+            "url": "{{profiles_base_url}}/staff"
+          }
+        },
+        {
+          "name": "Front Desk Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('front_desk_token', pm.response.json().access_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{front_desk_email}}\",\n  \"password\": \"{{front_desk_password}}\"\n}"
+            },
+            "url": "{{profiles_base_url}}/auth/login"
+          }
+        },
+        {
+          "name": "Create Admin User",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{admin_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"second.admin@example.com\",\n  \"password\": \"another-admin-pass\",\n  \"role\": \"admin\"\n}"
+            },
+            "url": "{{profiles_base_url}}/staff"
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Booking - Slots",
+      "description": "'Generate Slots for Provider' expands the provider's schedule (set via 'Update Provider Schedule (self)' in the Providers folder) + any time-off into real bookable Slot rows in the booking database — a real cross-service call (booking fetches the schedule/time-off from profiles' API), not a manual DB script. It's idempotent: running it again for the same provider/window creates nothing new, and it also reconciles — an open slot that no longer matches the current schedule/time-off gets blocked, and a blocked one that's valid again gets reopened.\n\nThree doors trigger the same underlying logic: (1) automatically, the instant a provider's schedule or time-off changes in profiles (fire-and-forget call to 'Trigger Slot Reconciliation' below, started as a ReconcileProviderSlotsWorkflow); (2) a 24h Temporal Schedule (`slot-generation-daily` in the Temporal UI's Schedules tab), which reconciles every provider on a fixed cadence as a safety net; (3) 'Generate Slots for Provider' itself, as a manual backup for on-demand use or when (1)/(2) are missed.",
+      "item": [
+        {
+          "name": "Generate Slots for Provider",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "console.log('slots generated:', pm.response.json().length);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": "{{booking_base_url}}/slots/generate?provider_id={{provider_id}}&days_ahead=14",
+            "description": "Requires the provider to already have a schedule set (run 'Update Provider Schedule (self)' in the Providers folder first) — otherwise this returns an empty list, not an error, since 'no schedule entries' is a valid state. Re-running this is safe; it only creates slots that don't already exist.\n\nThis now also reconciles, not just generates: it shares the same logic as the automatic trigger below, so it will also block any open slot that no longer matches the current schedule/time-off, and reopen any blocked slot that's valid again. That's why it's the documented backup path — same effect, callable manually."
+          }
+        },
+        {
+          "name": "Trigger Slot Reconciliation (internal, normally automatic)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('status is 202', () => pm.response.to.have.status(202));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{booking_base_url}}/slots/reconcile?provider_id={{provider_id}}&days_ahead=14",
+            "description": "You normally never call this directly — profiles calls it automatically (fire-and-forget, best-effort) right after 'Update Provider Schedule (self)' or 'Add Time Off (self)' commits. It's here so you can trigger the exact same reconciliation on demand, e.g. to re-check the Temporal UI without editing a schedule again. No Authorization header: this is a service-to-service call (profiles -> booking), same as booking's own unauthenticated reads of profiles' schedule/time-off endpoints — not meant to be user-facing. Returns 202 immediately; the actual work happens in a ReconcileProviderSlotsWorkflow, visible in the Temporal UI."
+          }
+        },
+        {
+          "name": "List Open Slots",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient_token}}" }],
+            "url": "{{booking_base_url}}/slots",
+            "description": "Run 'Generate Slots for Provider' first if this comes back empty."
+          }
+        },
+        {
+          "name": "List Open Slots for Provider",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const xCache = pm.response.headers.get('X-Cache');",
+                  "pm.test('X-Cache header is present (MISS on first call, HIT on repeats)', () => {",
+                  "    pm.expect(xCache).to.be.oneOf(['HIT', 'MISS']);",
+                  "});",
+                  "console.log('X-Cache:', xCache);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient_token}}" }],
+            "url": "{{booking_base_url}}/slots?provider_id={{provider_id}}",
+            "description": "This provider-filtered query is cache-aside via Redis (see app/core/cache.py). Send it twice in a row: the first response has `X-Cache: MISS` (served from the DB, then cached), the second has `X-Cache: HIT` (served from Redis, no DB query) — check the header in the Response panel, not just the test result. Booking, cancelling, rescheduling, or generating slots for this provider invalidates the cache, so the next call after any of those flips back to `MISS`. Inspect the raw cached value directly with `docker exec redis redis-cli get slots:provider:{{provider_id}}`."
+          }
+        },
+        {
+          "name": "Select a Slot for Booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const slots = pm.response.json();",
+                  "pm.test('at least one open slot exists', () => {",
+                  "    pm.expect(slots.length, 'No open slots found for this provider — run \\'Generate Slots for Provider\\' first (needs a schedule set via \\'Update Provider Schedule (self)\\'), then re-run this request.').to.be.above(0);",
+                  "});",
+                  "if (slots.length > 0) {",
+                  "    pm.collectionVariables.set('slot_id', slots[0].id);",
+                  "    console.log('selected slot_id:', slots[0].id, 'start_time:', slots[0].start_time);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient_token}}" }],
+            "url": "{{booking_base_url}}/slots?provider_id={{provider_id}}",
+            "description": "Run this right before 'Book Appointment' — it picks the first open slot returned for this provider and stores its id in the `slot_id` collection variable automatically, so you don't have to copy-paste a UUID by hand. If it fails with 'No open slots found', run 'Generate Slots for Provider' first and re-run this."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Booking - Appointments",
+      "description": "Requires a real row in the booking service's `slots` table first. Primary path: run 'Generate Slots for Provider' + 'Select a Slot for Booking' in the 'Booking - Slots' folder — that's a real endpoint now, not a manual script. A slot is single-use once booked, so re-run generation (it's idempotent — safe to call repeatedly) or select a different one before every 'Book Appointment' run.\n\nFallback for edge-case testing (e.g. a slot at an exact time 'Generate' wouldn't produce), inside the running `booking` container:\n  docker exec booking python -c \"import uuid; from datetime import datetime, timedelta, timezone; from app.db.session import SessionLocal; from app import crud; db=SessionLocal(); s=crud.slot.create(db, provider_id=uuid.UUID('{{provider_id}}'), start_time=datetime.now(timezone.utc)+timedelta(days=1), end_time=datetime.now(timezone.utc)+timedelta(days=1, minutes=30)); db.commit(); print(s.id)\"\n\nBooking is saga-driven (Week 2) — 'Book Appointment' returns 202 + 'pending' immediately and requires an Idempotency-Key header (this collection auto-generates a fresh one via Postman's {{$guid}} on every send, so re-running it books a NEW appointment rather than replaying the old one — swap in a fixed value manually if you want to test the replay/duplicate-prevention behavior instead). Poll 'Get Appointment Status' afterward to see it resolve to 'confirmed' — the real work happens in the separate `booking-worker` container, visible live at http://localhost:8080.",
+      "item": [
+        {
+          "name": "List My Appointments (patient)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient_token}}" }],
+            "url": "{{booking_base_url}}/appointments?patient_id={{patient_id}}",
+            "description": "Every appointment for this patient, any status — the way to discover an appointment id you don't already have, e.g. after a fresh-booking waitlist promotion (which never hands the promoted patient a new id directly — see the Waitlist folder). Self or front_desk/admin only; another patient's token gets 403."
+          }
+        },
+        {
+          "name": "List Provider's Appointments",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{provider_token}}" }],
+            "url": "{{booking_base_url}}/appointments?provider_id={{provider_id}}",
+            "description": "Every appointment booked against this provider, any status — the provider's own schedule view. Self (matching provider_token) or front_desk/admin only; a different provider's token gets 403."
+          }
+        },
+        {
+          "name": "Book Appointment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 202 Accepted', () => pm.response.to.have.status(202));",
+                  "pm.test('status is pending', () => pm.expect(pm.response.json().status).to.eql('pending'));",
+                  "if (pm.response.code === 202) {",
+                  "    pm.collectionVariables.set('appointment_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient_token}}" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": \"{{patient_id}}\",\n  \"provider_id\": \"{{provider_id}}\",\n  \"slot_id\": \"{{slot_id}}\"\n}"
+            },
+            "url": "{{booking_base_url}}/appointments"
+          }
+        },
+        {
+          "name": "Get Appointment Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('appointment status:', pm.response.json().status);",
+                  "pm.test('status is a known state', () => {",
+                  "    pm.expect(['pending', 'reserved', 'payment_pending', 'confirmed', 'failed', 'cancelled', 'completed'])",
+                  "        .to.include(pm.response.json().status);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient_token}}" }],
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}/status",
+            "description": "Run this repeatedly right after 'Book Appointment' to watch the saga progress — check the Postman Console (View > Show Postman Console) for the logged status each time. It usually reaches 'confirmed' within well under a second, since the stubbed activities are trivial DB updates with no real external latency."
+          }
+        },
+        {
+          "name": "PATCH Only Accepts Cancelled (expect 400)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"completed\"\n}"
+            },
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}",
+            "description": "PATCH is cancel-only by design — rescheduling is its own endpoint ('Reschedule Appointment' below), since it needs a target slot, not just a status flip."
+          }
+        },
+        {
+          "name": "Reschedule Appointment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 202', () => pm.response.to.have.status(202));",
+                  "console.log('reschedule started — poll Get Appointment Status to see slot_id change to reschedule_new_slot_id');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"new_slot_id\": \"{{reschedule_new_slot_id}}\"\n}"
+            },
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}/reschedule",
+            "description": "Set the `reschedule_new_slot_id` collection variable to a different OPEN slot for the same (or another) provider first — e.g. run 'Select a Slot for Booking' again to pick a fresh one, then copy its id in manually so it doesn't collide with `slot_id` (the appointment's current slot). Returns 202 immediately with the OLD slot_id still showing; poll 'Get Appointment Status' to see it move to the new slot once the workflow's swap step commits. Blocked with 409 if within 30 minutes of the current slot's start time (patients only — front desk can override)."
+          }
+        },
+        {
+          "name": "Cancel Appointment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status is cancelled', () => pm.expect(pm.response.json().status).to.eql('cancelled'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cancelled\"\n}"
+            },
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}"
+          }
+        },
+        {
+          "name": "Verify Slot Reopened After Cancel",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const slots = pm.response.json();",
+                  "pm.test('cancelled slot is open again', () => {",
+                  "    pm.expect(slots.some(s => s.id === pm.collectionVariables.get('slot_id'))).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient_token}}" }],
+            "url": "{{booking_base_url}}/slots"
+          }
+        },
+        {
+          "name": "Verify Calendar Sync (Week 3, no auth)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{booking_base_url}}/calendar-sync-log?appointment_id={{appointment_id}}",
+              "host": ["{{booking_base_url}}"],
+              "path": ["calendar-sync-log"],
+              "query": [{ "key": "appointment_id", "value": "{{appointment_id}}" }]
+            }
+          }
+        },
+        {
+          "name": "Verify Reminder Scheduled (Week 3, no auth)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{booking_base_url}}/reminders?appointment_id={{appointment_id}}",
+              "host": ["{{booking_base_url}}"],
+              "path": ["reminders"],
+              "query": [{ "key": "appointment_id", "value": "{{appointment_id}}" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Booking - Waitlist",
+      "description": "Waitlist is per-slot, not per-provider — a patient waits for one specific already-taken slot. Promotion happens automatically (not from anything you click here) inside 'Cancel Appointment' and inside a reschedule's release-old-slot step: it shifts an existing confirmed appointment onto the freed slot if the waitlisted patient already has one with that provider, otherwise books them fresh. Watch it happen via the Temporal UI (a new workflow execution appears with no corresponding Postman click) and by re-running 'Get Waitlist for Slot' to see the entry move from 'waiting' to 'fulfilled'.",
+      "item": [
+        {
+          "name": "Join Waitlist",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('status is waiting', () => pm.expect(pm.response.json().status).to.eql('waiting'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient2_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"slot_id\": \"{{slot_id}}\"\n}"
+            },
+            "url": "{{booking_base_url}}/waitlist",
+            "description": "Uses patient2_token so a DIFFERENT patient than the one holding the appointment on slot_id joins the wait — otherwise this is just you waiting for your own slot. Only works on a slot that's currently taken (not 'open') — book it first with patient_token."
+          }
+        },
+        {
+          "name": "Join Waitlist for an Open Slot (expect 400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient2_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"slot_id\": \"{{reschedule_new_slot_id}}\"\n}"
+            },
+            "url": "{{booking_base_url}}/waitlist",
+            "description": "Uses a slot that's still open (e.g. reschedule_new_slot_id, if you haven't rescheduled onto it yet) — should reject with 400 since you should just book it directly."
+          }
+        },
+        {
+          "name": "Get Waitlist for Slot",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient_token}}" }],
+            "url": "{{booking_base_url}}/waitlist?slot_id={{slot_id}}",
+            "description": "Run again after cancelling the appointment on this slot — the entry's status should flip from 'waiting' to 'fulfilled'."
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Booking - Visits",
+      "description": "Plain CRUD state machine (check_in -> start -> complete), not a Temporal workflow — see app/crud/visit.py. Run against a CONFIRMED appointment (poll 'Get Appointment Status' after booking until it shows 'confirmed' first).",
+      "item": [
+        {
+          "name": "Check In (front desk)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('visit status is checked_in', () => pm.expect(pm.response.json().status).to.eql('checked_in'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{front_desk_token}}" }],
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}/check-in"
+          }
+        },
+        {
+          "name": "Start Visit (provider)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('visit status is in_progress', () => pm.expect(pm.response.json().status).to.eql('in_progress'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{provider_token}}" }],
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}/start"
+          }
+        },
+        {
+          "name": "Complete Visit (provider)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('visit status is completed', () => pm.expect(pm.response.json().status).to.eql('completed'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{provider_token}}" }],
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}/complete"
+          }
+        },
+        {
+          "name": "Start Visit Before Check-In (expect 404)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{provider_token}}" }],
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}/start",
+            "description": "Run against an appointment that has never been checked in — no Visit row exists yet, so this should 404 rather than creating one out of order."
+          }
+        },
+        {
+          "name": "Check In Twice (expect 409)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{front_desk_token}}" }],
+            "url": "{{booking_base_url}}/appointments/{{appointment_id}}/check-in",
+            "description": "Run right after a successful 'Check In' on the same appointment — a second check-in should 409 (already_checked_in), not silently succeed or create a duplicate Visit."
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. RBAC & Negative Tests",
+      "item": [
+        {
+          "name": "Get Patient Profile Without Token (expect 401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{profiles_base_url}}/patients/{{patient_id}}"
+          }
+        },
+        {
+          "name": "Get Another Patient's Profile (expect 403)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{patient2_token}}" }],
+            "url": "{{profiles_base_url}}/patients/{{patient_id}}"
+          }
+        },
+        {
+          "name": "Admin Can Read Any Patient Profile (expect 200)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": "{{profiles_base_url}}/patients/{{patient_id}}"
+          }
+        },
+        {
+          "name": "Non-Admin Attempts to Create Clinic (expect 403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Rogue Clinic\",\n  \"address\": \"Nowhere\",\n  \"open_time\": \"09:00:00\",\n  \"close_time\": \"17:00:00\"\n}"
+            },
+            "url": "{{profiles_base_url}}/clinics"
+          }
+        },
+        {
+          "name": "Patient Books on Behalf of Another Patient (expect 403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient2_token}}" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": \"{{patient_id}}\",\n  \"provider_id\": \"{{provider_id}}\",\n  \"slot_id\": \"{{slot_id}}\"\n}"
+            },
+            "url": "{{booking_base_url}}/appointments",
+            "description": "patient2_token's own subject is patient2_id, but the body claims patient_id — booking must reject this as booking on someone else's behalf. Rejected before the idempotency/slot checks even run, so this doesn't consume the slot."
+          }
+        },
+        {
+          "name": "Double-Book the Same Slot (expect 409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{patient2_token}}" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": \"{{patient2_id}}\",\n  \"provider_id\": \"{{provider_id}}\",\n  \"slot_id\": \"{{slot_id}}\"\n}"
+            },
+            "url": "{{booking_base_url}}/appointments",
+            "description": "Run this right after 'Book Appointment' succeeds for patient 1 (same slot_id, different Idempotency-Key since these are different patients/attempts) — the slot already has an active (non-cancelled/failed) appointment on it via the partial-unique-index check in create_pending, so this 409s immediately, before Temporal is even involved."
+          }
+        }
+      ]
+    },
+    {
+      "name": "10. Notification & Audit (Week 3, no auth)",
+      "description": "Both are Kafka consumers, not called directly by anything above — they react to events profiles/booking already published (outbox pattern) whenever you ran the folders above. No auth on these endpoints, same debug-surface precedent as booking's 'Verify Calendar Sync'/'Verify Reminder Scheduled'. `notification` stores one row per event with a canned message per topic (still stubbed — no real email/SMS); `audit` stores every event as a hash-chained, INSERT-only record and can independently re-verify that chain on demand.",
+      "item": [
+        {
+          "name": "List Notifications",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{notification_base_url}}/notifications"
+          }
+        },
+        {
+          "name": "List Audit Log",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{audit_base_url}}/audit"
+          }
+        },
+        {
+          "name": "Verify Audit Hash Chain",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{audit_base_url}}/audit/verify",
+            "description": "Recomputes every row's hash from scratch and compares — the same check booking's celery-beat runs nightly (task booking.verify_audit_chain_task, see deploy/docker-manual-commands.md's Celery section) and pages on if it ever returns valid:false."
+          }
+        }
+      ]
+    }
+  ]
+}

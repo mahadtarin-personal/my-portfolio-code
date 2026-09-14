@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+psycopg[binary]
+alembic
+pydantic-settings
+confluent-kafka
+-e ../../libs/kafka_shared
+-e ../../libs/logging_shared
+-e ../../libs/tracing_shared
+-e ../../libs/metrics_shared
